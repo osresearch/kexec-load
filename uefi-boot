@@ -1,0 +1,82 @@
+#!/bin/bash
+
+firmware="$1"
+ramdisk="$2"
+
+if [ ! -r "$firmware" ]; then
+	echo >&2 "$1: firmware image not found"
+	exit 1
+fi
+
+# build payloadConfig for a 115200 baud serial port on ttyS0 / COM1
+echo "LnxBoot1 serial=115200" > /tmp/config.txt
+
+# add the ACPI tables. typically it looks like
+# ACPI20=0x3fbfa014
+# ACPI=0x3fbfa000
+# SMBIOS=0x3fbcd000
+cat /sys/firmware/efi/systab >> /tmp/config.txt
+
+if [ -n "$ramdisk" ]; then
+	if [ ! -r "$ramdisk" ]; then
+		echo >&2 "$ramdisk: ramdisk not found"
+		exit 1
+	fi
+
+	ramdisk_size=$(wc -c < "$ramdisk")
+	echo "ramdisk=0xc10000,$ramdisk_size,5" >> /tmp/config.txt
+	ramdisk_arg="0xc10000=$ramdisk"
+else
+	ramdisk_arg=""
+fi
+
+
+
+# figure out all the memory maps
+#define LINUXBOOT_MEM_RAM 1
+#define LINUXBOOT_MEM_DEFAULT 2
+#define LINUXBOOT_MEM_ACPI 3
+#define LINUXBOOT_MEM_NVS 4
+#define LINUXBOOT_MEM_RESERVED 5
+
+for map in /sys/firmware/memmap/* ; do
+	start=$(cat "$map/start")
+	end=$(cat "$map/end")
+	typename=$(cat "$map/type")
+
+	case $typename in
+		"System RAM") memtype=1 ;;
+		"ACPI Tables") memtype=3 ;;
+		"ACPI Non-volatile Storage") memtype=4 ;;
+		"Reserved") memtype=5 ;;
+		*) echo "$typename: unknown memory region" ; exit 1 ;;
+	esac
+
+	echo "mem=$start,$end,$memtype" >> /tmp/config.txt
+done
+
+
+# get the PE entry point with some grubbyness
+byte() { dd if="$1" bs=1 skip="$[$2]" count=1 2>/dev/null | xxd -p ; }
+word() {
+        b3=$(byte "$1" $[$2 + 3]) 
+        b2=$(byte "$1" $[$2 + 2])
+        b1=$(byte "$1" $[$2 + 1])
+        b0=$(byte "$1" $[$2 + 0])
+        echo "$b3$b2$b1$b0"
+}
+
+entry=$[0x8000A0 + 0x$(word "$firmware" 0x148)]
+
+echo >&2 "$firmware: entry point $entry"
+cat /tmp/config.txt
+sleep 2
+
+set -x
+exec kexec-load \
+	$entry \
+	0x800000="$firmware" \
+	0x7F0000=/tmp/config.txt \
+	$ramdisk_arg \
+
+
