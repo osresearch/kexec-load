@@ -4,8 +4,6 @@
  *
  * usage:
  * kexec-load entrypoint address=file [address=file ...]
-
- kexec-load 0x804560 0x800000=bin/UEFIPAYLOAD.fd
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -21,6 +19,7 @@
 #include <sys/syscall.h>
 #include <linux/kexec.h>
 #include <linux/reboot.h>
+#include <getopt.h>
 
 
 /*
@@ -45,11 +44,7 @@ long kexec_load(
 // TODO: where is this defined?
 #define PAGESIZE (4096uL)
 
-
-static const char usage[] =
-"Usage: kexec-load entry address[+len]=file [address=file ...]\n";
-
-
+static int verbose = 0;
 
 static void * read_file(const char * filename, size_t * size_out)
 {
@@ -62,6 +57,9 @@ static void * read_file(const char * filename, size_t * size_out)
 		goto fail_stat;
 
 	const size_t size = statbuf.st_size;
+
+	if (verbose)
+		fprintf(stderr, "%s: %zu bytes\n", filename, size);
 
 	uint8_t * buf = malloc(size);
 	if (!buf)
@@ -97,24 +95,74 @@ fail_open:
 }
 
 
+static const char usage[] =
+"-h | --help              This help\n"
+"-e | --entry address     Entry point address\n"
+"-p | --preserve-context  Enable load-preserve-context flag\n"
+"-v | --verbose           Print debug info\n"
+"\n"
+"address[+len]=file\n"
+"address[+len]=physical-address\n"
+"";
+
+static const struct option options[] = {
+	{ "help", no_argument, 0, 'h' },
+	{ "entry", required_argument, 0, 'e' },
+	{ "preserve-context", no_argument, 0, 'p' },
+	{ "verbose", no_argument, 0, 'v' },
+	{ "reboot", no_argument, 0, 'r' },
+	{ 0, 0, 0, 0},
+};
+
+
 int main(int argc, char ** argv)
 {
 	unsigned long flags = KEXEC_ARCH_DEFAULT;
 	struct kexec_segment segments[KEXEC_SEGMENT_MAX];
 
-	if (argc <= 2)
+	int do_reboot = 0;
+	unsigned long entrypoint = 0;
+	const char * entrypoint_str = NULL;
+
+	/* Reset getopt for the next pass. */
+	opterr = 1;
+	optind = 1;
+
+	while (1)
 	{
-		fprintf(stderr, usage);
-		return EXIT_FAILURE;
+		const int opt = getopt_long(argc, argv, "h?e:pvr", options, 0);
+		if (opt < 0)
+			break;
+
+		switch(opt) {
+		case 'p':
+			flags |= KEXEC_PRESERVE_CONTEXT;
+			break;
+		case 'e':
+			entrypoint_str = optarg;
+			break;
+		case 'v':
+			verbose++;
+			break;
+		case 'r':
+			do_reboot = 1;
+			break;
+		case '?': case 'h':
+			printf("%s", usage);
+			return EXIT_FAILURE;
+		default:
+			fprintf(stderr, "%s", usage);
+			return EXIT_FAILURE;
+		}
 	}
 
-	const char * entrypoint_str = argv[1];
-	const int num_segments = argc - 2;
+	const int num_segments = argc - optind;
 
-	if(strcmp(entrypoint_str, "-h")==0 || strcmp(entrypoint_str,"--help")==0 )
+	if (num_segments <= 0)
 	{
-		printf(usage);
-		return EXIT_SUCCESS;
+		// no segments specified
+		fprintf(stderr, "No segments specified!\n");
+		return EXIT_FAILURE;
 	}
 
 	if (num_segments > KEXEC_SEGMENT_MAX)
@@ -125,17 +173,20 @@ int main(int argc, char ** argv)
 
 
 	char * str_end;
-	unsigned long entrypoint = strtoul(entrypoint_str, &str_end, 0);
-	if (*str_end != '\0')
+	if (entrypoint_str)
 	{
-		fprintf(stderr, "entrypoint parse error '%s'\n", entrypoint_str);
-		return EXIT_FAILURE;
+		entrypoint = strtoul(entrypoint_str, &str_end, 0);
+		if (*str_end != '\0')
+		{
+			fprintf(stderr, "entrypoint parse error '%s'\n", entrypoint_str);
+			return EXIT_FAILURE;
+		}
 	}
 
 
 	for(int i=0 ; i < num_segments ; i++)
 	{
-		const char * addr_str = argv[i + 2];
+		const char * addr_str = argv[optind + i];
 		unsigned long addr = strtoul(addr_str, &str_end, 0);
 		ssize_t memsz = -1;
 		if (*str_end == '+')
@@ -174,6 +225,7 @@ int main(int argc, char ** argv)
 		memsz = (memsz + PAGESIZE - 1) & ~(PAGESIZE-1);
 
 
+		if (verbose)
 		fprintf(stderr, "%016lx+%016lx=%s: %p + %016lx\n",
 			addr,
 			memsz,
@@ -190,12 +242,22 @@ int main(int argc, char ** argv)
 		};
 	}
 
+	if (verbose)
+		fprintf(stderr, "kexec-load: entrypoint=%lx flags=%lx segments=%d\n",
+			entrypoint, flags, num_segments);
+
 	int rc = kexec_load(entrypoint, num_segments, segments, flags);
 	if (rc < 0)
 	{
 		perror("kexec_load");
 		return EXIT_FAILURE;
 	}
+
+	if (!do_reboot)
+		return EXIT_SUCCESS;
+
+	if (verbose)
+		fprintf(stderr, "kexec-load: rebooting\n");
 
 	rc = reboot(LINUX_REBOOT_CMD_KEXEC);
 	if (rc < 0)
@@ -205,5 +267,5 @@ int main(int argc, char ** argv)
 	}
 
 	printf("kexec-load: we shouldn't be here...\n");
-	return EXIT_SUCCESS;
+	return EXIT_SUCCESS; // ???
 }
