@@ -3,3 +3,5 @@ kexec-load
 a.out
 core
 .*.swp
+*.bin
+*.elf
