@@ -1,0 +1,5 @@
+*.patch
+kexec-load
+a.out
+core
+.*.swp
